@@ -35,6 +35,23 @@ def api(path: str, fields: dict[str, str] | None = None, optional: bool = False)
         raise
 
 
+def release_info(repository: str, tag: str, optional: bool = False):
+    # REST's /releases/tags/{tag} resolves published releases only. The CLI
+    # also resolves pending draft tags through GraphQL; use that database ID
+    # for the REST response so a retry can find its own unpublished draft.
+    try:
+        result = json.loads(run_gh(['release', 'view', tag, '--repo', repository,
+                                   '--json', 'databaseId']))
+    except RuntimeError as error:
+        if optional and 'release not found' in str(error).lower():
+            return None
+        raise
+    release_id = result['databaseId']
+    if type(release_id) is not int or release_id <= 0:
+        raise ValueError('GitHub returned an invalid release ID')
+    return api(f'repos/{repository}/releases/{release_id}')
+
+
 def validate_assets(archive: Path, checksum: Path, version: str) -> dict:
     if not VERSION.fullmatch(version):
         raise ValueError('Invalid application version')
@@ -79,7 +96,7 @@ def publish(repository: str, commit: str, version: str, archive: Path, checksum:
         raise ValueError('A full source commit SHA is required')
     manifest = validate_assets(archive, checksum, version)
     tag = 'v' + version
-    release = api(f'repos/{repository}/releases/tags/{quote(tag, safe="")}', optional=True)
+    release = release_info(repository, tag, optional=True)
     if release and not release['draft']:
         names = {a['name'] for a in release['assets']}
         if not {archive.name, checksum.name}.issubset(names):
@@ -119,11 +136,11 @@ def publish(repository: str, commit: str, version: str, archive: Path, checksum:
             run_gh(arguments)
     # Overwriting assets is limited to the workflow-owned unpublished draft.
     run_gh(['release', 'upload', tag, str(archive), str(checksum), '--repo', repository, '--clobber'])
-    draft = api(f'repos/{repository}/releases/tags/{quote(tag, safe="")}')
+    draft = release_info(repository, tag)
     if not {archive.name, checksum.name}.issubset({a['name'] for a in draft['assets']}):
         raise ValueError('Both release assets must be uploaded before publishing')
     run_gh(['release', 'edit', tag, '--repo', repository, '--draft=false'])
-    published = api(f'repos/{repository}/releases/tags/{quote(tag, safe="")}')
+    published = release_info(repository, tag)
     if published['draft']:
         raise ValueError('GitHub did not publish the draft release')
     print(f'Published: {published["html_url"]}')

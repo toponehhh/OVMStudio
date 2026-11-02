@@ -62,36 +62,38 @@ class ReleaseTests(unittest.TestCase):
 
     def test_corrupt_assets_never_reach_github(self):
         self.archive.write_bytes(self.archive.read_bytes() + b'tampered')
-        with patch.object(publish_release, 'api') as github:
+        with patch.object(publish_release, 'api') as github, patch.object(publish_release, 'release_info') as lookup:
             with self.assertRaises(ValueError):
                 publish_release.publish('toponehhh/OVMStudio', self.commit, self.version, self.archive, self.checksum)
             github.assert_not_called()
+            lookup.assert_not_called()
 
     def test_published_version_is_not_replaced_by_later_main_commits(self):
         release = {'draft': False, 'html_url': 'https://example.test/release',
                    'assets': [{'name': self.archive.name}, {'name': self.checksum.name}]}
-        with patch.object(publish_release, 'api', return_value=release) as github, patch.object(publish_release, 'run_gh') as command:
+        with patch.object(publish_release, 'release_info', return_value=release) as lookup, patch.object(publish_release, 'api') as github, patch.object(publish_release, 'run_gh') as command:
             result = publish_release.publish('toponehhh/OVMStudio', self.commit, self.version, self.archive, self.checksum)
             self.assertEqual(result, release['html_url'])
-            self.assertEqual(github.call_count, 1)
+            lookup.assert_called_once()
+            github.assert_not_called()
             command.assert_not_called()
 
     def test_existing_tag_cannot_be_moved_to_another_commit(self):
-        with patch.object(publish_release, 'api', side_effect=[None, {'object': {'type': 'commit', 'sha': 'b' * 40}}]) as github, patch.object(publish_release, 'run_gh') as command:
+        with patch.object(publish_release, 'release_info', return_value=None), patch.object(publish_release, 'api', return_value={'object': {'type': 'commit', 'sha': 'b' * 40}}) as github, patch.object(publish_release, 'run_gh') as command:
             with self.assertRaisesRegex(ValueError, 'another commit'):
                 publish_release.publish('toponehhh/OVMStudio', self.commit, self.version, self.archive, self.checksum)
             self.assertTrue(all(call.kwargs.get('fields') is None for call in github.call_args_list))
             command.assert_not_called()
 
     def test_manual_draft_is_not_overwritten(self):
-        with patch.object(publish_release, 'api', return_value={'draft': True, 'body': 'manual release'}) as github, patch.object(publish_release, 'run_gh') as command:
+        with patch.object(publish_release, 'release_info', return_value={'draft': True, 'body': 'manual release'}), patch.object(publish_release, 'api') as github, patch.object(publish_release, 'run_gh') as command:
             with self.assertRaisesRegex(ValueError, 'not owned'):
                 publish_release.publish('toponehhh/OVMStudio', self.commit, self.version, self.archive, self.checksum)
-            self.assertEqual(github.call_count, 1)
+            github.assert_not_called()
             command.assert_not_called()
 
     def test_incomplete_published_release_does_not_get_replaced(self):
-        with patch.object(publish_release, 'api', return_value={'draft': False, 'assets': []}), patch.object(publish_release, 'run_gh') as command:
+        with patch.object(publish_release, 'release_info', return_value={'draft': False, 'assets': []}), patch.object(publish_release, 'run_gh') as command:
             with self.assertRaisesRegex(ValueError, 'incomplete'):
                 publish_release.publish('toponehhh/OVMStudio', self.commit, self.version, self.archive, self.checksum)
             command.assert_not_called()
@@ -101,8 +103,6 @@ class ReleaseTests(unittest.TestCase):
         operations = []
 
         def github(path, fields=None, optional=False):
-            if path.endswith('/releases/tags/v0.1.1'):
-                return state['release']
             if '/git/ref/tags/' in path:
                 return state['tag']
             if path.endswith('/git/refs'):
@@ -130,9 +130,31 @@ class ReleaseTests(unittest.TestCase):
                 raise AssertionError(arguments)
             return ''
 
-        with patch.object(publish_release, 'api', side_effect=github), patch.object(publish_release, 'run_gh', side_effect=command):
+        with patch.object(publish_release, 'release_info', side_effect=lambda *args, **kwargs: state['release']), patch.object(publish_release, 'api', side_effect=github), patch.object(publish_release, 'run_gh', side_effect=command):
             publish_release.publish('toponehhh/OVMStudio', self.commit, self.version, self.archive, self.checksum)
         self.assertEqual(operations, ['tag', 'create', 'upload', 'edit'])
+
+    def test_draft_lookup_uses_id_instead_of_the_published_tag_index(self):
+        draft = {'id': 123, 'draft': True, 'tag_name': 'v0.1.1'}
+
+        def github(path, **kwargs):
+            if '/releases/tags/' in path:
+                raise RuntimeError('gh: Not Found (HTTP 404)')
+            self.assertEqual(path, 'repos/toponehhh/OVMStudio/releases/123')
+            return draft
+
+        with patch.object(publish_release, 'run_gh', return_value='{"databaseId":123}') as command, patch.object(publish_release, 'api', side_effect=github):
+            self.assertEqual(publish_release.release_info('toponehhh/OVMStudio', 'v0.1.1'), draft)
+            self.assertEqual(command.call_args.args[0][:3], ['release', 'view', 'v0.1.1'])
+
+    def test_missing_release_is_optional_but_auth_errors_are_not(self):
+        with patch.object(publish_release, 'run_gh', side_effect=RuntimeError('release not found')):
+            self.assertIsNone(publish_release.release_info('toponehhh/OVMStudio', 'v0.1.1', optional=True))
+            with self.assertRaises(RuntimeError):
+                publish_release.release_info('toponehhh/OVMStudio', 'v0.1.1')
+        with patch.object(publish_release, 'run_gh', side_effect=RuntimeError('gh: Forbidden (HTTP 403)')):
+            with self.assertRaises(RuntimeError):
+                publish_release.release_info('toponehhh/OVMStudio', 'v0.1.1', optional=True)
 
 
 if __name__ == '__main__':
