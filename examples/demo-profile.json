@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "name": "Tiny Add · 本地验证",
+  "mode": "local",
+  "values": {
+    "model_name": "tiny-add",
+    "model_path": "tiny-add",
+    "rest_port": "8000",
+    "port": "9000",
+    "rest_bind_address": "127.0.0.1",
+    "grpc_bind_address": "127.0.0.1",
+    "target_device": "CPU",
+    "log_level": "INFO"
+  }
+}

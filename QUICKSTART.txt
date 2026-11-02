@@ -1,0 +1,15 @@
+OVMS Studio - Windows x64
+
+1. 解压完整压缩包。
+2. 双击 OVMS-Studio\OVMS-Studio.exe。
+3. 选择模型，调整端口和参数，点击“启动服务”。
+
+已内置 Intel OVMS 2026.4.1 和 Python 运行时。
+无需配置 OVMS 路径，无需另外安装 Python。
+移动程序时请保留 OVMS-Studio.exe 旁边的整个 ovms 子目录。
+
+体验示例：在 UI 中导入 examples\demo-profile.json 后启动。
+tiny-add 模型将 [1,2,3] 计算为 [2,4,6]。
+
+GPU/NPU 推理仍需要对应设备驱动。
+完整说明和验证记录见 README.md 与 docs\verification.md。

@@ -1,0 +1,28 @@
+[package]
+name = "ovms-studio"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.92"
+description = "A native Rust + Slint launcher for Intel OpenVINO Model Server"
+license = "MIT"
+build = "build.rs"
+
+[dependencies]
+slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+directories = "6"
+arboard = { version = "3", default-features = false }
+open = "5"
+png = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+
+[build-dependencies]
+slint-build = "=1.18.1"
+
+[profile.release]
+lto = "thin"
+strip = true

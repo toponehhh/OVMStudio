@@ -1,0 +1,7 @@
+/target/
+/work/
+/dist/
+__pycache__/
+*.log
+/.idea/
+/.vscode/

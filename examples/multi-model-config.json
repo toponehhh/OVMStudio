@@ -1,0 +1,11 @@
+{
+  "model_config_list": [
+    {
+      "config": {
+        "name": "tiny-add",
+        "base_path": "tiny-add",
+        "target_device": "CPU"
+      }
+    }
+  ]
+}
