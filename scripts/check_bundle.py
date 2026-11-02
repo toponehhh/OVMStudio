@@ -56,12 +56,19 @@ log_file = output / 'ui.log'
 capture = output / 'ui'
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 inference = None
+# A cold hosted Windows runner can spend over 100 seconds initializing the UI
+# before it starts OVMS. Keep polling through that cold
+# start; the UI still has its own 70-second server/lifecycle deadline.
+startup_timeout = 180
+completion_timeout = 85
+started = time.monotonic()
+ready_after = None
 with log_file.open('w', encoding='utf-8') as log:
     process = subprocess.Popen(
         [str(bundle / 'OVMS-Studio.exe'), '--smoke-test', '--profile', str(profile_file), '--capture-dir', str(capture)],
         cwd=unrelated, env=env, stdout=log, stderr=subprocess.STDOUT)
     try:
-        deadline = time.monotonic() + 45
+        deadline = started + startup_timeout
         while time.monotonic() < deadline and process.poll() is None:
             try:
                 with opener.open(f'http://127.0.0.1:{ports[0]}/v2/health/ready', timeout=0.5) as response:
@@ -72,16 +79,18 @@ with log_file.open('w', encoding='utf-8') as log:
                                                      data=data, headers={'Content-Type': 'application/json'})
                     with opener.open(request, timeout=5) as response:
                         inference = json.load(response)['outputs'][0]['data']
+                    ready_after = time.monotonic() - started
+                    print(f'First endpoint inference after {ready_after:.2f}s.', flush=True)
                     break
             except (OSError, ValueError):
                 time.sleep(0.15)
-        code = process.wait(timeout=85)
+        code = process.wait(timeout=completion_timeout)
     except BaseException:
         process.kill()
         process.wait()
         raise
 assert code == 0, log_file.read_text(encoding='utf-8', errors='replace')
-assert inference == [2, 4, 6], inference
+assert inference == [2, 4, 6], f'Inference was {inference}; startup budget was {startup_timeout}s'
 ui = json.loads((capture / 'report.json').read_text(encoding='utf-8'))
 assert all(ui[k] for k in ['ready', 'restart_ready', 'configuration_callbacks', 'stopped_on_close'])
 assert ui['error'] is None
@@ -99,7 +108,8 @@ profile_file.write_text(json.dumps(profile, ensure_ascii=False), encoding='utf-8
 negative_capture = output / 'missing-runtime-ui'
 negative = subprocess.run([str(missing / 'OVMS-Studio.exe'), '--smoke-test', '--profile', str(profile_file),
                            '--capture-dir', str(negative_capture)], cwd=unrelated, env=negative_env,
-                          capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=85)
+                          capture_output=True, text=True, encoding='utf-8', errors='replace',
+                          timeout=startup_timeout + completion_timeout)
 negative_report = json.loads((negative_capture / 'report.json').read_text(encoding='utf-8'))
 assert negative.returncode != 0
 assert not negative_report['ready']
@@ -107,6 +117,8 @@ assert '内置 OVMS 缺失' in negative_report['error']
 result = {'bundle': str(bundle), 'clean_path': True, 'unrelated_working_directory': True,
           'legacy_runtime_path_ignored': True, 'bundled_python': python_info,
           'inference': inference, 'ui': ui, 'missing_runtime_rejected': True,
+          'endpoint_ready_after_seconds': round(ready_after, 2),
+          'verification_elapsed_seconds': round(time.monotonic() - started, 2),
           'screenshots': str(capture)}
 (output / 'report.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
 (project / 'work/bundle-check-result.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
