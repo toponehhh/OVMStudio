@@ -140,6 +140,7 @@ export component MainWindow inherits Window {
     in-out property <int> page: 0;
     in property <string> application-version;
     in property <int> mode: 0;
+    in property <int> execution-mode: 0;
     in property <[FieldData]> fields;
     in property <[string]> saved-names;
     in property <bool> has-profiles: false;
@@ -159,14 +160,16 @@ export component MainWindow inherits Window {
     in property <string> task-label: "传统推理 / 自动识别";
     in property <string> device-label: "CPU";
     in property <string> log-text;
-    in property <string> help-text: "正在检测应用内置的 OVMS 版本与完整启动参数…";
-    in property <string> runtime-version: "内置 OVMS 2026.4.1 · 无需配置运行时路径";
+    in property <string> help-text: "请先在设置中准备运行环境，随后可读取完整启动参数。";
+    in property <string> runtime-version: "运行环境尚未准备";
+    in property <string> runtime-status: "首次启动会自动获取最新稳定版，也可在这里提前准备。";
     in property <string> toast: "准备就绪";
     in property <bool> running: false;
     in property <bool> ready: false;
     in property <bool> failed: false;
     in property <bool> rest-enabled: true;
     in property <bool> inspecting: false;
+    in property <bool> preparing: false;
     in property <bool> dialog-busy: false;
     in-out property <bool> follow-logs: true;
 
@@ -178,6 +181,9 @@ export component MainWindow inherits Window {
     callback start-server;
     callback stop-server;
     callback inspect-runtime;
+    callback execution-changed(int);
+    callback prepare-runtime;
+    callback cancel-runtime;
     callback save-profile(string);
     callback load-profile(string);
     callback import-profile;
@@ -221,12 +227,13 @@ export component MainWindow inherits Window {
                 Navigation { number: "03"; label: "推理与性能"; selected: root.page == 2; clicked => { root.navigate(2); } }
                 Navigation { number: "04"; label: "高级参数"; selected: root.page == 3; clicked => { root.navigate(3); } }
                 Navigation { number: "05"; label: "运行日志"; selected: root.page == 4; clicked => { root.navigate(4); } }
-                Navigation { number: "06"; label: "运行时帮助"; selected: root.page == 5; clicked => { root.navigate(5); } }
+                Navigation { number: "06"; label: "设置"; selected: root.page == 5; clicked => { root.navigate(5); } }
+                Navigation { number: "07"; label: "运行时帮助"; selected: root.page == 6; clicked => { root.navigate(6); } }
                 Rectangle { height: 1px; background: Colors.border; }
                 Text { text: "快速配置"; font-size: 10px; color: #6c7e96; height: 25px; vertical-alignment: center; }
-                Action { label: "文本生成 / LLM"; enabled: !root.running; clicked => { root.apply-preset(0); } }
-                Action { label: "Embedding 向量"; enabled: !root.running; clicked => { root.apply-preset(1); } }
-                Action { label: "传统推理模型"; enabled: !root.running; clicked => { root.apply-preset(2); } }
+                Action { label: "文本生成 / LLM"; enabled: !root.running && !root.preparing; clicked => { root.apply-preset(0); } }
+                Action { label: "Embedding 向量"; enabled: !root.running && !root.preparing; clicked => { root.apply-preset(1); } }
+                Action { label: "传统推理模型"; enabled: !root.running && !root.preparing; clicked => { root.apply-preset(2); } }
                 Rectangle { vertical-stretch: 1; }
                 Rectangle {
                     height: 92px;
@@ -238,8 +245,8 @@ export component MainWindow inherits Window {
                         padding: 12px;
                         spacing: 5px;
                         Text { text: "Intel® OpenVINO™"; font-size: 11px; color: Colors.text; }
-                        Text { text: "内置 OVMS 2026.4.1"; font-size: 10px; color: Colors.muted; }
-                        Text { text: "开箱即用 · 本机推理"; font-size: 9px; color: #668d8a; }
+                        Text { text: root.execution-mode == 1 ? "Docker 容器模式" : "本机运行模式"; font-size: 10px; color: Colors.muted; }
+                        Text { text: "按需下载 · 自动管理"; font-size: 9px; color: #668d8a; }
                     }
                 }
                 Action { label: "官方文档 ↗"; clicked => { root.open-url("docs"); } }
@@ -271,7 +278,7 @@ export component MainWindow inherits Window {
                             background: #19352f;
                             border-width: 1px;
                             border-color: #285348;
-                            Text { text: "●  LOCAL  /  本机"; font-family: "Microsoft YaHei UI"; font-size: 10px; font-weight: 600; color: Colors.mint; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: root.execution-mode == 1 ? "●  DOCKER" : "●  本机运行"; font-family: "Microsoft YaHei UI"; font-size: 10px; font-weight: 600; color: Colors.mint; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
@@ -291,19 +298,19 @@ export component MainWindow inherits Window {
                         HorizontalLayout {
                             padding: 12px;
                             spacing: 8px;
-                            LineEdit { text <=> root.profile-name; placeholder-text: "为配置命名"; enabled: !root.running; min-width: 80px; edited(value) => { root.name-changed(value); } }
+                            LineEdit { text <=> root.profile-name; placeholder-text: "为配置命名"; enabled: !root.running && !root.preparing; min-width: 80px; edited(value) => { root.name-changed(value); } }
                             Action { label: "保存配置"; enabled: !root.dialog-busy; clicked => { root.save-profile(root.profile-name); } }
-                            Action { label: "导入"; width: 48px; enabled: !root.running && !root.dialog-busy; clicked => { root.import-profile(); } }
+                            Action { label: "导入"; width: 48px; enabled: !root.running && !root.preparing && !root.dialog-busy; clicked => { root.import-profile(); } }
                             Action { label: "导出"; width: 48px; enabled: !root.dialog-busy; clicked => { root.export-profile(); } }
                         }
                     }
-                    if root.has-profiles: ComboBox { height: 34px; enabled: !root.running; model: root.saved-names; selected(value) => { root.load-profile(value); } }
+                    if root.has-profiles: ComboBox { height: 34px; enabled: !root.running && !root.preparing; model: root.saved-names; selected(value) => { root.load-profile(value); } }
                     if root.page == 0: HorizontalLayout {
                         height: 37px;
                         spacing: 7px;
-                        Action { label: "本地模型"; selected: root.mode == 0; enabled: !root.running; clicked => { root.mode-changed(0); } }
-                        Action { label: "Hugging Face"; selected: root.mode == 1; enabled: !root.running; clicked => { root.mode-changed(1); } }
-                        Action { label: "多模型 config.json"; selected: root.mode == 2; enabled: !root.running; clicked => { root.mode-changed(2); } }
+                        Action { label: "本地模型"; selected: root.mode == 0; enabled: !root.running && !root.preparing; clicked => { root.mode-changed(0); } }
+                        Action { label: "Hugging Face"; selected: root.mode == 1; enabled: !root.running && !root.preparing; clicked => { root.mode-changed(1); } }
+                        Action { label: "多模型 config.json"; selected: root.mode == 2; enabled: !root.running && !root.preparing; clicked => { root.mode-changed(2); } }
                     }
                     if root.page == 3: LineEdit { height: 36px; placeholder-text: "搜索高级参数，例如 cache、CORS、日志…"; edited => { root.filter-changed(self.text); } }
                     if root.page < 4: Rectangle {
@@ -318,7 +325,7 @@ export component MainWindow inherits Window {
                                 spacing: 10px;
                                 for field in root.fields: Param {
                                     data: field;
-                                    enabled: !root.running && !root.dialog-busy;
+                                    enabled: !root.running && !root.preparing && !root.dialog-busy;
                                     changed(value) => { root.field-changed(field.key, value); }
                                     browse(folder) => { root.browse(field.key, folder); }
                                 }
@@ -362,6 +369,44 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: Colors.border;
                         background: Colors.panel;
+                        clip: true;
+                        ScrollView {
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 18px;
+                            Text { text: "OVMS 运行方式"; font-size: 17px; font-weight: 700; color: Colors.text; height: 27px; }
+                            Text { text: "这是应用级设置，会自动保存。模型、端口和推理参数可在两种方式中复用。"; font-size: 12px; color: Colors.muted; wrap: word-wrap; min-height: 36px; }
+                            HorizontalLayout {
+                                height: 42px;
+                                spacing: 12px;
+                                Action { label: "本机运行"; selected: root.execution-mode == 0; enabled: !root.running && !root.preparing && !root.inspecting; clicked => { root.execution-changed(0); } }
+                                Action { label: "Docker 容器"; selected: root.execution-mode == 1; enabled: !root.running && !root.preparing && !root.inspecting; clicked => { root.execution-changed(1); } }
+                            }
+                            Rectangle { height: 1px; background: Colors.border; }
+                            Text { text: root.execution-mode == 0 ? "本机模式" : "Docker 模式"; font-size: 14px; font-weight: 600; color: Colors.mint; height: 24px; }
+                            Text {
+                                text: root.execution-mode == 0 ? "从 Intel 官方 Release 下载最新 Windows x64 运行包，校验 SHA-256 后自动解压。无需选择 OVMS 路径，也无需单独安装 Python。" : "先检查 Docker 客户端、引擎连接和 Linux 容器模式，按目标设备拉取最新稳定版官方 CPU 或 GPU/NPU 镜像。启动时自动挂载模型并映射端口；停止或退出时清理容器。";
+                                font-size: 12px; color: Colors.muted; wrap: word-wrap; min-height: 80px;
+                            }
+                            Text { text: "首次使用自动下载，之后复用已准备的版本；需要升级时点击下方更新按钮。"; font-size: 11px; color: Colors.muted; wrap: word-wrap; min-height: 37px; }
+                            HorizontalLayout {
+                                height: 38px;
+                                spacing: 9px;
+                                Action { label: root.preparing ? "正在准备…" : root.execution-mode == 0 ? "下载 / 更新最新 OVMS" : "检查 Docker 并拉取最新镜像"; primary: true; enabled: !root.running && !root.preparing && !root.inspecting; clicked => { root.prepare-runtime(); } }
+                                if root.preparing: Action { label: "取消"; width: 70px; clicked => { root.cancel-runtime(); } }
+                                if root.execution-mode == 1: Action { label: "安装 Docker ↗"; width: 128px; clicked => { root.open-url("docker"); } }
+                            }
+                            Text { text: root.runtime-status; font-size: 12px; color: Colors.mint; wrap: word-wrap; min-height: 72px; }
+                            if root.execution-mode == 1: Text { text: "加速器需要宿主驱动与设备透传。Windows GPU 需要 WSL2，Windows NPU 请使用本机模式。"; font-size: 11px; color: Colors.muted; wrap: word-wrap; min-height: 36px; }
+                            Rectangle { height: 1px; }
+                        }
+                        }
+                    }
+                    if root.page == 6: Rectangle {
+                        border-radius: 9px;
+                        border-width: 1px;
+                        border-color: Colors.border;
+                        background: Colors.panel;
                         VerticalLayout {
                             padding: 16px;
                             spacing: 10px;
@@ -369,7 +414,7 @@ export component MainWindow inherits Window {
                             HorizontalLayout {
                                 height: 34px;
                                 spacing: 8px;
-                                Action { label: root.inspecting ? "正在检测…" : "重新检测内置 OVMS"; enabled: !root.inspecting; clicked => { root.inspect-runtime(); } }
+                                Action { label: root.inspecting ? "正在检测…" : "读取当前 OVMS 帮助"; enabled: !root.inspecting && !root.preparing; clicked => { root.inspect-runtime(); } }
                             }
                             TextEdit { text: root.help-text; read-only: true; font-family: "Consolas"; font-size: 11px; wrap: word-wrap; }
                         }
@@ -450,7 +495,7 @@ export component MainWindow inherits Window {
                         }
                         Rectangle { vertical-stretch: 1; min-height: 0px; }
                         if root.validation-error != "" && !root.running: Text { text: root.validation-error; font-size: 11px; color: #e4bd80; wrap: word-wrap; min-height: 32px; max-height: 62px; overflow: elide; }
-                        Action { label: root.running ? "停止服务" : "启动服务"; primary: !root.running; danger: root.running; enabled: root.running || (root.validation-error == "" && !root.dialog-busy); height: 44px; clicked => { if root.running { root.stop-server(); } else { root.start-server(); } } }
+                        Action { label: root.preparing ? (root.running ? "取消准备" : "正在准备环境…") : root.running ? "停止服务" : "启动服务"; primary: !root.running; danger: root.running; enabled: root.running || (!root.preparing && root.validation-error == "" && !root.dialog-busy); height: 44px; clicked => { if root.running { root.stop-server(); } else { root.start-server(); } } }
                         HorizontalLayout {
                             height: 33px;
                             spacing: 7px;

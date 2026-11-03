@@ -1,6 +1,6 @@
 use ovms_studio::config::{Mode, Profile};
 use ovms_studio::process::{Event, Manager, Phase};
-use ovms_studio::runtime::{LaunchSpec, http_ready, inspect_runtime_in_bundle};
+use ovms_studio::runtime::{LaunchSpec, http_ready, inspect_native_runtime};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -35,7 +35,7 @@ fn bundle() -> PathBuf {
     )
 }
 fn prepare(profile: &Profile) -> LaunchSpec {
-    LaunchSpec::prepare_in_bundle(profile, &bundle()).unwrap()
+    LaunchSpec::prepare_native(profile, &bundle(), &std::env::current_dir().unwrap()).unwrap()
 }
 fn wait(manager: &Manager, wanted: Phase) -> String {
     let end = Instant::now() + Duration::from_secs(25);
@@ -171,7 +171,8 @@ fn multi_model_configuration_uses_real_config_json() {
 fn local_help_confirms_embedding_flag_and_version() {
     let mut p = profile();
     p.set("task", "embeddings");
-    let (version, help) = inspect_runtime_in_bundle(&p, &bundle()).unwrap();
+    let (version, help) =
+        inspect_native_runtime(&p, &bundle(), &std::env::current_dir().unwrap()).unwrap();
     assert!(version.contains("2026.4.1"), "{version}");
     assert!(help.contains("--max_length"));
     assert!(!help.contains("--max_legth"));

@@ -141,6 +141,7 @@ fn supervise(
                             Err(e) => {
                                 let _ = child.kill();
                                 let _ = child.wait();
+                                let _ = spec.cleanup();
                                 state(&events, Phase::Failed, e, None);
                                 continue;
                             }
@@ -185,16 +186,19 @@ fn supervise(
                         "正在终止 OVMS 及其子进程…",
                         Some(process.child.id()),
                     );
-                    terminate(&mut process);
+                    let stopped = terminate(&mut process);
                     for reader in process.readers {
                         let _ = reader.join();
                     }
-                    state(&events, Phase::Idle, "服务已停止，端口已释放", None);
+                    match stopped {
+                        Ok(()) => state(&events, Phase::Idle, "服务已停止，端口已释放", None),
+                        Err(error) => state(&events, Phase::Failed, error, None),
+                    }
                 }
             }
             Ok(Control::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 if let Some(mut process) = active.take() {
-                    terminate(&mut process);
+                    let _ = terminate(&mut process);
                     for reader in process.readers {
                         let _ = reader.join();
                     }
@@ -209,6 +213,7 @@ fn supervise(
         match process.child.try_wait() {
             Ok(Some(exit)) => {
                 let process = active.take().unwrap();
+                let _ = process.spec.cleanup();
                 // Dropping the Job also terminates lingering conversion processes.
                 #[cfg(windows)]
                 drop(process.job);
@@ -230,7 +235,7 @@ fn supervise(
             }
             Err(e) => {
                 let mut process = active.take().unwrap();
-                terminate(&mut process);
+                let _ = terminate(&mut process);
                 state(
                     &events,
                     Phase::Failed,
@@ -312,11 +317,14 @@ fn read_pipe(
     })
 }
 
-fn terminate(process: &mut Active) {
+fn terminate(process: &mut Active) -> Result<(), String> {
+    // A Docker CLI process is separate from the daemon-owned container.
+    let cleaned = process.spec.cleanup();
     #[cfg(windows)]
     process.job.terminate();
     let _ = process.child.kill();
     let _ = process.child.wait();
+    cleaned
 }
 
 #[cfg(windows)]

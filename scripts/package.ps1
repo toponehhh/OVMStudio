@@ -6,12 +6,6 @@ $ovmsRelease = if ($ReleaseBinary) { [IO.Path]::GetFullPath($ReleaseBinary) } el
 if (-not $ReleaseBinary -and -not (Test-Path -LiteralPath $ovmsRelease)) { $ovmsRelease = Join-Path $ovmsProjectRoot 'target\x86_64-pc-windows-msvc\release\ovms-studio.exe' }
 if (-not $ReleaseBinary -and -not (Test-Path -LiteralPath $ovmsRelease)) { $ovmsRelease = Join-Path $ovmsProjectRoot 'target\release\ovms-studio.exe' }
 if (-not (Test-Path -LiteralPath $ovmsRelease)) { throw 'Build the release executable first.' }
-$ovmsRuntime = Join-Path $ovmsProjectRoot 'work\runtime-python-on\ovms'
-$ovmsRuntimeSource = Join-Path $ovmsProjectRoot 'work\runtime-python-on\runtime-source.json'
-foreach ($ovmsRequired in @('ovms.exe', 'openvino.dll', 'python\python.exe', 'LICENSE', 'thirdparty-licenses')) {
-    if (-not (Test-Path -LiteralPath (Join-Path $ovmsRuntime $ovmsRequired))) { throw "The complete bundled OVMS runtime is missing: $ovmsRequired" }
-}
-if (-not (Test-Path -LiteralPath $ovmsRuntimeSource)) { throw 'Verified runtime source metadata is missing.' }
 $ovmsBuildId = [guid]::NewGuid().ToString('N')
 $ovmsStageParent = Join-Path $ovmsProjectRoot "work\package stages\$ovmsBuildId"
 $ovmsStage = Join-Path $ovmsStageParent 'OVMS-Studio'
@@ -23,23 +17,16 @@ foreach ($ovmsFile in @('LICENSE', 'README.md', 'QUICKSTART.txt')) {
 foreach ($ovmsFolder in @('examples', 'docs')) {
     Copy-Item -LiteralPath (Join-Path $ovmsProjectRoot $ovmsFolder) -Destination $ovmsStage -Recurse
 }
-Write-Output 'Copying the complete official OVMS runtime and its licenses...'
-& (Join-Path $env:SystemRoot 'System32\robocopy.exe') $ovmsRuntime (Join-Path $ovmsStage 'ovms') /E /COPY:DAT /DCOPY:DAT /MT:8 /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "Runtime copy failed with robocopy exit code $LASTEXITCODE" }
-$global:LASTEXITCODE = 0
-$ovmsSource = Get-Content -LiteralPath $ovmsRuntimeSource -Raw | ConvertFrom-Json
 $ovmsManifest = [ordered]@{
     application_version = $ovmsVersion
-    runtime_version = $ovmsSource.version
-    runtime_flavor = $ovmsSource.flavor
-    runtime_source = $ovmsSource.source_url
-    runtime_archive_sha256 = $ovmsSource.archive_sha256
+    distribution = 'ui-only'
+    runtime_delivery = 'on-demand'
+    supported_backends = @('native', 'docker')
     application_sha256 = (Get-FileHash -LiteralPath (Join-Path $ovmsStage 'OVMS-Studio.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
-    runtime_executable_sha256 = (Get-FileHash -LiteralPath (Join-Path $ovmsStage 'ovms\ovms.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 $ovmsManifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $ovmsStage 'bundle-manifest.json') -Encoding utf8
 @{ stage = $ovmsStage; version = $ovmsVersion } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $ovmsProjectRoot 'work\bundle-stage.json') -Encoding utf8
-if ($StageOnly) { Write-Output "Staged complete application: $ovmsStage"; return }
+if ($StageOnly) { Write-Output "Staged UI-only application: $ovmsStage"; return }
 
 function Assert-OvmsWorkspacePath([string]$Candidate) {
     $ovmsAbsolute = [IO.Path]::GetFullPath($Candidate)

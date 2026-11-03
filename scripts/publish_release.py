@@ -64,14 +64,15 @@ def validate_assets(archive: Path, checksum: Path, version: str) -> dict:
         raise ValueError('Release archive SHA-256 verification failed')
     with zipfile.ZipFile(archive) as source:
         manifest = json.loads(source.read('OVMS-Studio/bundle-manifest.json').decode('utf-8-sig'))
-        if manifest['application_version'] != version or manifest['runtime_flavor'] != 'python_on':
+        if (manifest['application_version'] != version or manifest.get('distribution') != 'ui-only'
+                or manifest.get('runtime_delivery') != 'on-demand'
+                or set(manifest.get('supported_backends', [])) != {'native', 'docker'}):
             raise ValueError('Bundle manifest does not match the release')
-        for file, key in [('OVMS-Studio.exe', 'application_sha256'),
-                          ('ovms/ovms.exe', 'runtime_executable_sha256')]:
-            if hashlib.sha256(source.read('OVMS-Studio/' + file)).hexdigest() != manifest[key]:
-                raise ValueError(f'Bundled executable SHA-256 mismatch: {file}')
-        source.getinfo('OVMS-Studio/ovms/python/python.exe')
-        source.getinfo('OVMS-Studio/ovms/LICENSE')
+        if hashlib.sha256(source.read('OVMS-Studio/OVMS-Studio.exe')).hexdigest() != manifest['application_sha256']:
+            raise ValueError('Application executable SHA-256 mismatch')
+        if any(name.lower().startswith('ovms-studio/ovms/') or name.lower().endswith(('/ovms.exe', '/python.exe'))
+               for name in source.namelist()):
+            raise ValueError('UI-only releases must not contain an OVMS runtime payload')
     return manifest
 
 
@@ -116,12 +117,13 @@ def publish(repository: str, commit: str, version: str, archive: Path, checksum:
     if release is None:
         notes = f'''{marker}
 
-## Windows x64 完整一体包
+## Windows x64 UI 程序包
 
-- 原生 Rust + Slint UI，内置 Intel OVMS {manifest['runtime_version']} 和 Python。
-- 完整解压后运行 `OVMS-Studio/OVMS-Studio.exe`，无需指定 OVMS 路径。
-- 下载 ZIP 和对应的 `.sha256`；GPU/NPU 仍需相应设备驱动。
-- 该构建已通过格式、静态检查、契约测试、真实 OVMS 推理和完整程序包验证。
+- 原生 Rust + Slint UI，程序包不包含 OVMS 运行包或 Docker 镜像。
+- 解压后运行 `OVMS-Studio/OVMS-Studio.exe`，在“设置”中选择本机或 Docker。
+- 本机模式自动下载最新官方 OVMS；Docker 模式检查本机引擎后按目标设备拉取最新官方镜像。
+- 后续启动复用缓存，在设置中可检查并更新最新版本。
+- 构建通过契约测试、本机真实推理、按需下载及 UI 验证；发布前还要求真实 Docker 集成测试通过。
 
 源代码：[本次提交](https://github.com/{repository}/commit/{commit})。
 '''

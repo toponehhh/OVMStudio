@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 pub const OVMS_VERSION: &str = "2026.4.1";
 pub const DOCS_URL: &str =
     "https://github.com/openvinotoolkit/model_server/blob/v2026.4.1/docs/parameters.md";
-pub fn bundled_program_relative() -> &'static str {
+pub fn runtime_program_relative() -> &'static str {
     if cfg!(windows) {
         "ovms/ovms.exe"
     } else {
@@ -1105,7 +1105,7 @@ impl Profile {
                 self.schema_version
             ));
         }
-        // Runtime selection belongs to the application bundle, never to a model profile.
+        // Runtime selection is an application setting, never an executable in a model profile.
         self.values.remove("executable");
         for f in fields() {
             self.values
@@ -1381,7 +1381,7 @@ impl Profile {
     }
     pub fn preview(&self) -> String {
         match self.arguments() {
-            Ok(args) => display_command(bundled_program_relative(), &args),
+            Ok(args) => display_command("ovms", &args),
             Err(e) => format!("填写完整配置后生成启动命令\n{e}"),
         }
     }
@@ -1511,6 +1511,33 @@ fn quote_argument(arg: &str) -> String {
 pub struct Library {
     pub current: Profile,
     pub saved: BTreeMap<String, Profile>,
+    pub runtime: RuntimeSettings,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Backend {
+    #[default]
+    Native,
+    Docker,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeSettings {
+    pub backend: Backend,
+    pub docker_acceleration: bool,
+}
+
+pub fn data_directory() -> PathBuf {
+    // This override keeps integration tests and portable deployments isolated.
+    std::env::var_os("OVMSTUDIO_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            directories::ProjectDirs::from("dev", "OVMSStudio", "OVMS Studio")
+                .map(|d| d.data_local_dir().join("runtimes"))
+                .unwrap_or_else(|| PathBuf::from("ovms-studio-runtimes"))
+        })
 }
 
 pub fn state_path() -> PathBuf {

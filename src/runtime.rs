@@ -1,4 +1,5 @@
-use crate::config::{Mode, Profile, bundled_program_relative, connect_host, is_cloud_path};
+use crate::config::{Mode, Profile, connect_host, is_cloud_path, runtime_program_relative};
+use crate::deployment::{Cancellation, PreparedRuntime, new_cancellation};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -14,41 +15,32 @@ pub struct LaunchSpec {
     pub cwd: PathBuf,
     pub env: BTreeMap<OsString, OsString>,
     pub profile: Profile,
+    pub container: Option<crate::docker::Container>,
 }
 
-pub fn bundle_directory() -> Result<PathBuf, String> {
+pub fn application_directory() -> Result<PathBuf, String> {
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let directory = executable.parent().ok_or("无法确定应用目录")?.to_owned();
-    #[cfg(debug_assertions)]
-    if !directory.join(bundled_program_relative()).is_file() {
-        // This development-only location is never compiled into the release launcher.
-        let development = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/runtime-python-on");
-        if development.join(bundled_program_relative()).is_file() {
-            return Ok(development);
-        }
-    }
     Ok(directory)
 }
 
-pub fn resolve_bundled_program(bundle: &Path) -> Result<PathBuf, String> {
-    let program = bundle.join(bundled_program_relative());
+pub fn resolve_native_program(bundle: &Path) -> Result<PathBuf, String> {
+    let program = bundle.join(runtime_program_relative());
     if !program.is_file() {
-        return Err(
-            "应用内置 OVMS 缺失，请重新解压完整的 OVMS Studio 程序包，并保留 ovms 子目录。".into(),
-        );
+        return Err("本机 OVMS 尚未下载或文件缺失，请在设置中准备最新运行环境。".into());
     }
-    std::fs::canonicalize(program).map_err(|e| format!("无法访问内置 OVMS：{e}"))
+    std::fs::canonicalize(program).map_err(|e| format!("无法访问已下载的 OVMS：{e}"))
 }
 
 impl LaunchSpec {
-    pub fn prepare(profile: &Profile) -> Result<Self, String> {
-        Self::prepare_in_bundle(profile, &bundle_directory()?)
-    }
-
-    pub fn prepare_in_bundle(profile: &Profile, bundle: &Path) -> Result<Self, String> {
+    pub fn prepare_native(
+        profile: &Profile,
+        runtime_root: &Path,
+        application: &Path,
+    ) -> Result<Self, String> {
         profile.validate_values()?;
-        let program = resolve_bundled_program(bundle)?;
-        let cwd = working_directory(bundle, profile.value("working_dir"))?;
+        let program = resolve_native_program(runtime_root)?;
+        let cwd = working_directory(application, profile.value("working_dir"))?;
         let local_path = |s: &str| {
             let p = Path::new(s);
             if p.is_absolute() {
@@ -100,7 +92,18 @@ impl LaunchSpec {
             cwd,
             env,
             profile: profile.clone(),
+            container: None,
         })
+    }
+
+    pub fn preview(&self) -> String {
+        crate::config::display_command(&self.program.to_string_lossy(), &self.args)
+    }
+
+    pub fn cleanup(&self) -> Result<(), String> {
+        self.container
+            .as_ref()
+            .map_or(Ok(()), |container| container.remove())
     }
 
     pub fn command(&self) -> Command {
@@ -142,7 +145,7 @@ impl LaunchSpec {
     }
 }
 
-fn working_directory(bundle: &Path, raw: &str) -> Result<PathBuf, String> {
+pub fn working_directory(bundle: &Path, raw: &str) -> Result<PathBuf, String> {
     let p = if raw.trim().is_empty() {
         bundle.to_owned()
     } else if Path::new(raw.trim()).is_relative() {
@@ -236,16 +239,28 @@ pub fn command_for(
     command
 }
 
-pub fn inspect_runtime(profile: &Profile) -> Result<(String, String), String> {
-    inspect_runtime_in_bundle(profile, &bundle_directory()?)
+pub fn inspect_runtime(
+    profile: &Profile,
+    ready: &PreparedRuntime,
+    application: &Path,
+) -> Result<(String, String), String> {
+    if ready.backend == crate::config::Backend::Docker {
+        return crate::docker::inspect_runtime(profile, ready);
+    }
+    inspect_native_runtime(
+        profile,
+        ready.native_root.as_deref().ok_or("本机运行时尚未准备")?,
+        application,
+    )
 }
 
-pub fn inspect_runtime_in_bundle(
+pub fn inspect_native_runtime(
     profile: &Profile,
     bundle: &Path,
+    application: &Path,
 ) -> Result<(String, String), String> {
-    let program = resolve_bundled_program(bundle)?;
-    let cwd = working_directory(bundle, profile.value("working_dir"))?;
+    let program = resolve_native_program(bundle)?;
+    let cwd = working_directory(application, profile.value("working_dir"))?;
     let env = runtime_environment(&program, &profile.environment()?);
     let version = bounded_output(command_for(&program, &cwd, &env, &["--version".into()]))?;
     let mut args = vec!["--help".into()];
@@ -257,21 +272,35 @@ pub fn inspect_runtime_in_bundle(
 }
 
 fn bounded_output(mut command: Command) -> Result<String, String> {
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("OVMS 检测启动失败：{e}"))?;
+    run_output(&mut command, Duration::from_secs(10), &new_cancellation())
+}
+
+pub fn run_output(
+    command: &mut Command,
+    timeout: Duration,
+    cancel: &Cancellation,
+) -> Result<String, String> {
+    let mut child = command.spawn().map_err(|e| format!("命令无法启动：{e}"))?;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let read = |pipe: Box<dyn Read + Send>| {
         std::thread::spawn(move || {
             let mut data = Vec::new();
-            let _ = pipe.take(512 * 1024).read_to_end(&mut data);
+            let mut pipe = pipe;
+            let mut buffer = [0; 8192];
+            while let Ok(n) = pipe.read(&mut buffer) {
+                if n == 0 {
+                    break;
+                }
+                let keep = n.min((512 * 1024_usize).saturating_sub(data.len()));
+                data.extend_from_slice(&buffer[..keep]);
+            }
             data
         })
     };
     let out = read(Box::new(stdout));
     let err = read(Box::new(stderr));
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -280,10 +309,10 @@ fn bounded_output(mut command: Command) -> Result<String, String> {
                 let _ = child.wait();
                 return Err(e.to_string());
             }
-            _ if Instant::now() >= deadline => {
+            _ if Instant::now() >= deadline || crate::deployment::check_cancel(cancel).is_err() => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("OVMS 检测超时，请检查程序和运行库".into());
+                return Err("运行环境操作超时或已取消，请检查网络、Docker 或运行库后重试".into());
             }
             _ => std::thread::sleep(Duration::from_millis(50)),
         }
@@ -294,7 +323,7 @@ fn bounded_output(mut command: Command) -> Result<String, String> {
     let text = String::from_utf8_lossy(&bytes).to_string();
     if !status.success() {
         return Err(format!(
-            "OVMS 检测退出 {status}：{}",
+            "命令退出 {status}：{}",
             text.chars().take(1500).collect::<String>()
         ));
     }

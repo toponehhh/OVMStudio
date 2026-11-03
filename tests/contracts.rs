@@ -1,5 +1,5 @@
 use ovms_studio::config::{Mode, Profile, connect_host, display_command, save_json};
-use ovms_studio::runtime::{LaunchSpec, http_ready, resolve_bundled_program};
+use ovms_studio::runtime::{LaunchSpec, http_ready, resolve_native_program};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
@@ -21,18 +21,15 @@ fn legacy_profile_runtime_path_is_discarded() {
             .any(|f| f.key == "executable")
     );
     assert!(!p.preview().contains("old-install"));
-    assert!(
-        p.preview()
-            .starts_with(ovms_studio::config::bundled_program_relative())
-    );
+    assert!(p.preview().starts_with("ovms"));
 }
 
 #[test]
-fn bundle_location_controls_runtime_and_default_working_directory() {
+fn managed_runtime_is_separate_from_the_application_working_directory() {
     let root = std::env::current_dir()
         .unwrap()
         .join("work/contract-bundle with spaces");
-    let program = root.join(ovms_studio::config::bundled_program_relative());
+    let program = root.join(ovms_studio::config::runtime_program_relative());
     std::fs::create_dir_all(program.parent().unwrap()).unwrap();
     std::fs::write(&program, b"resolver fixture only").unwrap();
     let mut p = local();
@@ -44,19 +41,22 @@ fn bundle_location_controls_runtime_and_default_working_directory() {
             .to_string_lossy(),
     );
     p.set("executable", "C:/legacy/runtime/ignored.exe");
-    let spec = LaunchSpec::prepare_in_bundle(&p, &root).unwrap();
+    let spec = LaunchSpec::prepare_native(&p, &root, &std::env::current_dir().unwrap()).unwrap();
     assert_eq!(spec.program, std::fs::canonicalize(&program).unwrap());
-    assert_eq!(spec.cwd, std::fs::canonicalize(&root).unwrap());
+    assert_eq!(
+        spec.cwd,
+        std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap()
+    );
 }
 
 #[test]
-fn missing_bundled_runtime_requests_the_complete_application_package() {
+fn missing_managed_runtime_requests_preparation_in_settings() {
     let root = std::env::current_dir()
         .unwrap()
         .join("work/missing-bundle-runtime");
     std::fs::create_dir_all(&root).unwrap();
-    let error = resolve_bundled_program(&root).unwrap_err();
-    assert!(error.contains("重新解压完整"));
+    let error = resolve_native_program(&root).unwrap_err();
+    assert!(error.contains("准备最新运行环境"));
     assert!(!error.contains("请选择"));
 }
 

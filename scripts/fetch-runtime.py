@@ -1,4 +1,4 @@
-"""Fetch the pinned official OVMS runtime used by the Windows portable bundle."""
+"""Fetch the pinned official OVMS fixture for tests; it is never packaged with the UI."""
 import hashlib
 import json
 from pathlib import Path

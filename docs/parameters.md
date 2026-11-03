@@ -1,6 +1,6 @@
 # OVMS 2026.4.1 启动参数核对
 
-核对日期：2026-11-02。按 GitHub `releases/latest` 查询，最新稳定发布为 `v2026.4.1`。实现绑定这个发布标签，避免把主分支中尚未发布的选项放入默认命令。
+参数核对基线为 `v2026.4.1`。0.2.0 起运行时按需获取官方最新稳定版，不随 UI 打包；参数表单沿用此研究基线，实际版本与 `--help` 可在界面中读取。
 
 ## 证据来源
 
@@ -11,7 +11,7 @@
 - [Embedding 参数解析器](https://github.com/openvinotoolkit/model_server/blob/v2026.4.1/src/graph_export/embeddings_graph_cli_parser.cpp)。
 - [图像生成参数解析器](https://github.com/openvinotoolkit/model_server/blob/v2026.4.1/src/graph_export/image_generation_graph_cli_parser.cpp)。
 - [官方裸机安装与环境说明](https://github.com/openvinotoolkit/model_server/blob/v2026.4.1/docs/deploying_server_baremetal.md)。
-- 0.1.1 一体包使用官方 Windows `python_on` 运行时，按官方发布的 SHA-256 校验。初版验证使用 `python_off`；两者 CLI 版本均为 `2026.4.1`。
+- 本机下载优先选择官方 `python_on` 包，也兼容 2026.5 起的统一 Windows 包名；校验官方 SHA-256 后安装。Docker 按目标设备使用最新稳定版官方 CPU 或 GPU/NPU 镜像。
 
 ## 运行模式与生成规则
 
@@ -27,7 +27,8 @@
 
 | 界面 | 参数 |
 |---|---|
-| 模型与来源 | `model_name`、`model_path`、`config_path`、`source_model`、`model_repository_path`、`task`、`weight-format`；OVMS 随应用内置，没有运行时路径选项 |
+| 模型与来源 | `model_name`、`model_path`、`config_path`、`source_model`、`model_repository_path`、`task`、`weight-format` |
+| 设置 | 本机 / Docker、准备最新环境及取消；应用级设置，不传入 OVMS CLI，无需选择可执行文件路径 |
 | 服务与网络 | `rest_port`、`port`、`rest_bind_address`、`grpc_bind_address`、`rest_workers`、`grpc_workers`、`metrics_enable`、`metrics_list` |
 | 通用推理 | `target_device`、`plugin_config` |
 | 传统推理 | `nireq`、`batch_size`、`shape`、`layout`、`model_version_policy` |
@@ -55,9 +56,9 @@
 6. **KV Cache**：`cache_size` 的发布 CLI 类型为 `uint32_t`，不是任意浮点数；`0` 表示动态分配。界面拒绝小数。
 7. **图像 Guidance scale**：CLI 类型为 float，支持 `7.5`。静态图片数与 Guidance scale 需要单一 `resolution`。
 8. **清理间隔**：文档部分描述写默认 `1`，CLI 实际默认 `300`；以对应发布源码为准。
-9. **API Key**：只保存 `api_key_file` 的路径，不读取文件内容。密钥或 `API_KEY` 的实际行为由内置 OVMS 版本决定。
-10. **内置运行时与环境**：发布版只加载 UI 旁的 `ovms/ovms.exe`。旧配置中的 `executable` 会移除，不搜索 PATH、`OVMS_HOME` 或开发目录。Windows 参照官方 `setupvars.bat` 配置随包提供的 DLL 和 Python；清除继承的 `PYTHONHOME`、`PYTHONPATH`，再设置内置环境。清除继承的 `OVMS_MODEL_REPOSITORY_PATH`，避免默认配置文件影响启动模式；自定义环境中的显式设置仍可覆盖。
+9. **API Key**：只保存 `api_key_file` 的路径，不读取文件内容。密钥或 `API_KEY` 的实际行为由实际运行的 OVMS 版本决定；Docker 自动挂载对应文件。
+10. **运行时与环境**：本机从用户缓存加载下载并校验的运行包，自动设置 DLL 和 Python 环境，不搜索 `OVMS_HOME` 或旧配置的可执行文件。Docker 先检测引擎，再拉取镜像并将主机路径/端口转换为容器挂载和映射。清除继承的 `OVMS_MODEL_REPOSITORY_PATH`，避免默认配置文件影响启动模式。
 11. **就绪检查**：只在后台子进程启动后探测所配置 REST 地址的 `/v2/health/ready`，HTTP 200 才标记「服务已就绪」。启动前先检查端口占用，避免误把已有服务当作这次启动的服务。端口检查与 OVMS 实际 bind 之间仍有通常的时间窗口；最终启动失败由退出状态和日志呈现。
-12. **扩展与版本差异**：`trace_path` 只在启用对应编译选项的二进制中存在，可在核对内置运行时帮助后通过扩展参数传入。主分支后续新增的参数不自动假定在 2026.4.1 中可用；升级运行时应重新构建与验证完整程序包。
+12. **扩展与版本差异**：核对当前运行时帮助后，可用 JSON 字符串数组传入新参数。参数表单不自动假定主分支未发布选项可用；运行时可在设置中独立更新，不需要重新打包 UI。
 
 本工具生成启动命令，完整的模型、设备、插件参数兼容性仍由实际 OVMS 验证。程序存在、端口开放、本地测试通过与生成式模型在特定硬件上可用，是不同的验证结论。

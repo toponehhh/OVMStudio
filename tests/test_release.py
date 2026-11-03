@@ -25,17 +25,13 @@ class ReleaseTests(unittest.TestCase):
         self.commit = 'a' * 40
         self.archive = self.root / f'OVMS-Studio-{self.version}-windows-x64.zip'
         self.checksum = Path(str(self.archive) + '.sha256')
-        gui, runtime = b'test GUI', b'test runtime'
-        manifest = {'application_version': self.version, 'runtime_version': '2026.4.1',
-                    'runtime_flavor': 'python_on',
-                    'application_sha256': hashlib.sha256(gui).hexdigest(),
-                    'runtime_executable_sha256': hashlib.sha256(runtime).hexdigest()}
+        gui = b'test GUI'
+        manifest = {'application_version': self.version, 'distribution': 'ui-only',
+                    'runtime_delivery': 'on-demand', 'supported_backends': ['native', 'docker'],
+                    'application_sha256': hashlib.sha256(gui).hexdigest()}
         with zipfile.ZipFile(self.archive, 'w') as archive:
             archive.writestr('OVMS-Studio/bundle-manifest.json', json.dumps(manifest))
             archive.writestr('OVMS-Studio/OVMS-Studio.exe', gui)
-            archive.writestr('OVMS-Studio/ovms/ovms.exe', runtime)
-            archive.writestr('OVMS-Studio/ovms/python/python.exe', b'test Python')
-            archive.writestr('OVMS-Studio/ovms/LICENSE', b'test license')
         self.checksum.write_text(hashlib.sha256(self.archive.read_bytes()).hexdigest() +
                                  '  ' + self.archive.name + '\n', encoding='ascii')
 
@@ -67,6 +63,14 @@ class ReleaseTests(unittest.TestCase):
                 publish_release.publish('toponehhh/OVMStudio', self.commit, self.version, self.archive, self.checksum)
             github.assert_not_called()
             lookup.assert_not_called()
+
+    def test_ui_only_release_rejects_accidentally_bundled_runtime(self):
+        with zipfile.ZipFile(self.archive, 'a') as archive:
+            archive.writestr('OVMS-Studio/ovms/ovms.exe', b'unwanted runtime')
+        self.checksum.write_text(hashlib.sha256(self.archive.read_bytes()).hexdigest() +
+                                 '  ' + self.archive.name + '\n', encoding='ascii')
+        with self.assertRaisesRegex(ValueError, 'runtime payload'):
+            publish_release.validate_assets(self.archive, self.checksum, self.version)
 
     def test_published_version_is_not_replaced_by_later_main_commits(self):
         release = {'draft': False, 'html_url': 'https://example.test/release',

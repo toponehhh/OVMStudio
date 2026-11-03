@@ -1,8 +1,9 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use ovms_studio::config::{self, Library, Mode, Profile};
+use ovms_studio::config::{self, Backend, Library, Mode, Profile};
+use ovms_studio::deployment::{self, Cancellation, PreparedRuntime};
 use ovms_studio::process::{Event, Manager, Phase};
-use ovms_studio::runtime::{self, LaunchSpec};
+use ovms_studio::runtime;
 use slint::{ComponentHandle, SharedString, VecModel};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -18,6 +19,8 @@ enum TaskResult {
     Imported(Result<Option<Profile>, String>),
     Written(Result<Option<String>, String>),
     Inspected(Result<(String, String), String>),
+    Prepared(Result<PreparedRuntime, String>),
+    RuntimeProgress(String),
 }
 
 struct App {
@@ -32,16 +35,47 @@ struct App {
     task_rx: mpsc::Receiver<TaskResult>,
     persist: bool,
     state_file: PathBuf,
+    prepared: Option<PreparedRuntime>,
+    runtime_cancel: Cancellation,
+    pending_start: bool,
+    application: PathBuf,
+    data: PathBuf,
+    command: Option<String>,
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.runtime_cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 impl App {
     fn refresh(&self, ui: &MainWindow, rebuild: bool) {
         let profile = &self.library.current;
         ui.set_mode(profile.mode.index());
+        ui.set_execution_mode(if self.library.runtime.backend == Backend::Docker {
+            1
+        } else {
+            0
+        });
         ui.set_profile_name(profile.name.clone().into());
         ui.set_validation_error(profile.validate_values().err().unwrap_or_default().into());
         let displayed = self.active.as_ref().unwrap_or(profile);
-        ui.set_command_preview(displayed.preview().into());
+        ui.set_command_preview(
+            self.command
+                .clone()
+                .unwrap_or_else(|| {
+                    if self.library.runtime.backend == Backend::Docker {
+                        format!(
+                            "docker run [启动时自动挂载模型并映射端口] openvino/model_server\n{}",
+                            displayed.preview()
+                        )
+                    } else {
+                        displayed.preview()
+                    }
+                })
+                .into(),
+        );
         ui.set_rest_endpoint(displayed.endpoint().into());
         ui.set_grpc_endpoint(displayed.grpc_endpoint().into());
         ui.set_rest_enabled(displayed.port("rest_port").is_ok_and(|p| p > 0));
@@ -146,8 +180,12 @@ impl App {
                 "实时收集 stdout / stderr，保留最近 1,000 行，可复制或导出。",
             ),
             5 => (
-                "内置 OVMS 运行时",
-                "运行时随应用提供，自动配置环境。可查看版本与完整启动参数。",
+                "选择 OVMS 运行方式",
+                "本机按需下载官方最新运行包，或检查 Docker 后拉取官方镜像。",
+            ),
+            6 => (
+                "查看当前运行时的启动参数",
+                "准备运行环境后，可读取实际 OVMS 版本及完整启动帮助。",
             ),
             _ => ("启动你的模型服务", "选择模型、配置推理，一键开放 API。"),
         };
@@ -186,14 +224,45 @@ impl App {
         Ok(())
     }
     fn start(&mut self, ui: &MainWindow) {
-        if ui.get_running() {
+        if ui.get_running() || ui.get_preparing() {
             return;
         }
         self.library.current.name = ui.get_profile_name().trim().to_owned();
-        match LaunchSpec::prepare(&self.library.current) {
+        if let Err(error) = self.library.current.validate_values() {
+            ui.set_failed(true);
+            ui.set_state_detail(error.clone().into());
+            self.notice(ui, error);
+            return;
+        }
+        if self.library.runtime.backend == Backend::Docker {
+            match ovms_studio::docker::requested_devices(&self.library.current, &self.application) {
+                Ok(devices) => {
+                    let acceleration = !devices.is_empty();
+                    if self
+                        .prepared
+                        .as_ref()
+                        .is_some_and(|ready| ready.docker_acceleration != acceleration)
+                    {
+                        self.prepared = None;
+                    }
+                }
+                Err(error) => {
+                    ui.set_failed(true);
+                    ui.set_state_detail(error.clone().into());
+                    self.notice(ui, error);
+                    return;
+                }
+            }
+        }
+        let Some(prepared) = self.prepared.as_ref() else {
+            self.prepare(ui, false, true);
+            return;
+        };
+        match prepared.prepare_launch(&self.library.current, &self.application, &self.data) {
             Ok(spec) => {
                 self.notice(ui, format!("启动 {}", spec.profile.value("model_name")));
                 self.active = Some(self.library.current.clone());
+                self.command = Some(spec.preview());
                 ui.set_running(true);
                 ui.set_ready(false);
                 ui.set_failed(false);
@@ -217,6 +286,67 @@ impl App {
             }
         }
         self.refresh(ui, false);
+    }
+
+    fn prepare(&mut self, ui: &MainWindow, update: bool, start_after: bool) {
+        if ui.get_preparing() || ui.get_running() || ui.get_inspecting() {
+            return;
+        }
+        let mut settings = self.library.runtime.clone();
+        if settings.backend == Backend::Docker {
+            match ovms_studio::docker::requested_devices(&self.library.current, &self.application) {
+                Ok(devices) => settings.docker_acceleration = !devices.is_empty(),
+                Err(error) => {
+                    ui.set_runtime_status(error.clone().into());
+                    self.notice(ui, error);
+                    return;
+                }
+            }
+        }
+        self.pending_start = start_after;
+        self.runtime_cancel = deployment::new_cancellation();
+        self.prepared = None;
+        self.command = None;
+        ui.set_preparing(true);
+        ui.set_running(start_after);
+        ui.set_failed(false);
+        ui.set_runtime_status("正在检查运行环境…".into());
+        if start_after {
+            ui.set_service_state("正在准备环境".into());
+            ui.set_state_detail("首次使用需要下载 OVMS 运行包或 Docker 镜像".into());
+        }
+        let data = self.data.clone();
+        let cancel = self.runtime_cancel.clone();
+        let tx = self.task_tx.clone();
+        std::thread::spawn(move || {
+            let progress = |text: String| {
+                let _ = tx.send(TaskResult::RuntimeProgress(text));
+            };
+            let result = deployment::prepare_runtime(&settings, &data, update, &cancel, &progress);
+            let _ = tx.send(TaskResult::Prepared(result));
+        });
+    }
+
+    fn inspect(&mut self, ui: &MainWindow) {
+        if ui.get_inspecting() || ui.get_preparing() {
+            return;
+        }
+        let Some(ready) = self.prepared.clone() else {
+            self.notice(ui, "请先在设置中准备运行环境");
+            self.navigate(ui, 5);
+            return;
+        };
+        ui.set_inspecting(true);
+        let profile = self.library.current.clone();
+        let application = self.application.clone();
+        let tx = self.task_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(TaskResult::Inspected(runtime::inspect_runtime(
+                &profile,
+                &ready,
+                &application,
+            )));
+        });
     }
     fn poll(&mut self, ui: &MainWindow) {
         let events = self.manager.events.try_iter().collect::<Vec<_>>();
@@ -263,6 +393,7 @@ impl App {
                     if !running {
                         self.active = None;
                         self.launched_at = None;
+                        self.command = None;
                         ui.set_process_info("无运行中的进程".into());
                         ui.set_health_detail("服务未运行".into());
                         self.refresh(ui, false);
@@ -342,7 +473,7 @@ impl App {
                         Ok((version, help)) => {
                             ui.set_runtime_version(version.into());
                             ui.set_help_text(help.into());
-                            self.notice(ui, "已读取本机 OVMS 版本与帮助");
+                            self.notice(ui, "已读取当前 OVMS 版本与帮助");
                         }
                         Err(e) => {
                             ui.set_runtime_version("运行时检测失败".into());
@@ -350,6 +481,49 @@ impl App {
                             self.notice(ui, e);
                         }
                     }
+                }
+                TaskResult::RuntimeProgress(text) => {
+                    ui.set_runtime_status(text.clone().into());
+                    if self.pending_start {
+                        ui.set_state_detail(text.clone().into());
+                    }
+                    self.notice(ui, text);
+                }
+                TaskResult::Prepared(result) => {
+                    ui.set_preparing(false);
+                    ui.set_running(false);
+                    let start_after = std::mem::take(&mut self.pending_start);
+                    match result {
+                        Ok(ready) if !self.runtime_cancel.load(Ordering::Relaxed) => {
+                            let description = ready.description();
+                            ui.set_runtime_status(description.clone().into());
+                            ui.set_runtime_version(description.clone().into());
+                            self.prepared = Some(ready);
+                            self.notice(ui, description);
+                            if start_after {
+                                self.start(ui);
+                            }
+                            self.inspect(ui);
+                        }
+                        result => {
+                            let cancelled = self.runtime_cancel.load(Ordering::Relaxed);
+                            let text = if cancelled {
+                                "运行环境准备已取消".into()
+                            } else {
+                                result.err().unwrap_or_else(|| "运行环境尚未准备".into())
+                            };
+                            ui.set_failed(!cancelled);
+                            ui.set_service_state(if cancelled {
+                                "服务已停止".into()
+                            } else {
+                                "环境需准备".into()
+                            });
+                            ui.set_state_detail(text.clone().into());
+                            ui.set_runtime_status(text.clone().into());
+                            self.notice(ui, text);
+                        }
+                    }
+                    self.refresh(ui, false);
                 }
             }
         }
@@ -435,7 +609,7 @@ fn wire(ui: &MainWindow, state: &Rc<RefCell<App>>) {
     let w = ui.as_weak();
     ui.on_field_changed(move |key, value| {
         if let Some(ui) = w.upgrade() {
-            if ui.get_running() {
+            if ui.get_running() || ui.get_preparing() {
                 return;
             }
             let mut app = a.borrow_mut();
@@ -454,7 +628,7 @@ fn wire(ui: &MainWindow, state: &Rc<RefCell<App>>) {
     let w = ui.as_weak();
     ui.on_mode_changed(move |mode| {
         if let Some(ui) = w.upgrade() {
-            if ui.get_running() {
+            if ui.get_running() || ui.get_preparing() {
                 return;
             }
             let mut app = a.borrow_mut();
@@ -483,14 +657,20 @@ fn wire(ui: &MainWindow, state: &Rc<RefCell<App>>) {
     ui.on_stop_server(move || {
         if let Some(ui) = w.upgrade() {
             ui.set_state_detail("正在停止服务…".into());
-            a.borrow().manager.stop();
+            let mut app = a.borrow_mut();
+            if ui.get_preparing() {
+                app.pending_start = false;
+                app.runtime_cancel.store(true, Ordering::Relaxed);
+            } else {
+                app.manager.stop();
+            }
         }
     });
     let a = state.clone();
     let w = ui.as_weak();
     ui.on_apply_preset(move |preset| {
         if let Some(ui) = w.upgrade() {
-            if ui.get_running() {
+            if ui.get_running() || ui.get_preparing() {
                 return;
             }
             let mut app = a.borrow_mut();
@@ -511,23 +691,58 @@ fn wire(ui: &MainWindow, state: &Rc<RefCell<App>>) {
     let w = ui.as_weak();
     ui.on_inspect_runtime(move || {
         if let Some(ui) = w.upgrade() {
-            if ui.get_inspecting() {
+            a.borrow_mut().inspect(&ui);
+        }
+    });
+    let a = state.clone();
+    let w = ui.as_weak();
+    ui.on_execution_changed(move |mode| {
+        if let Some(ui) = w.upgrade() {
+            if ui.get_running() || ui.get_preparing() || ui.get_inspecting() {
                 return;
             }
-            ui.set_inspecting(true);
-            let app = a.borrow();
-            let profile = app.library.current.clone();
-            let tx = app.task_tx.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(TaskResult::Inspected(runtime::inspect_runtime(&profile)));
-            });
+            let mut app = a.borrow_mut();
+            let backend = if mode == 1 {
+                Backend::Docker
+            } else {
+                Backend::Native
+            };
+            if app.library.runtime.backend == backend {
+                return;
+            }
+            app.library.runtime.backend = backend;
+            app.prepared = None;
+            app.command = None;
+            ui.set_help_text("准备运行环境后会显示完整启动参数".into());
+            if let Err(error) = app.persist() {
+                app.notice(&ui, error);
+            }
+            app.refresh(&ui, false);
+            app.prepare(&ui, true, false);
+        }
+    });
+    let a = state.clone();
+    let w = ui.as_weak();
+    ui.on_prepare_runtime(move || {
+        if let Some(ui) = w.upgrade() {
+            a.borrow_mut().prepare(&ui, true, false);
+        }
+    });
+    let a = state.clone();
+    let w = ui.as_weak();
+    ui.on_cancel_runtime(move || {
+        if let Some(ui) = w.upgrade() {
+            let mut app = a.borrow_mut();
+            app.pending_start = false;
+            app.runtime_cancel.store(true, Ordering::Relaxed);
+            ui.set_runtime_status("正在取消下载或镜像拉取…".into());
         }
     });
     let a = state.clone();
     let w = ui.as_weak();
     ui.on_browse(move |key, folder| {
         if let Some(ui) = w.upgrade() {
-            if ui.get_running() || ui.get_dialog_busy() {
+            if ui.get_running() || ui.get_preparing() || ui.get_dialog_busy() {
                 return;
             }
             ui.set_dialog_busy(true);
@@ -606,7 +821,7 @@ fn wire(ui: &MainWindow, state: &Rc<RefCell<App>>) {
     let w = ui.as_weak();
     ui.on_load_profile(move |name| {
         if let Some(ui) = w.upgrade() {
-            if ui.get_running() {
+            if ui.get_running() || ui.get_preparing() {
                 return;
             }
             let mut app = a.borrow_mut();
@@ -626,7 +841,7 @@ fn wire(ui: &MainWindow, state: &Rc<RefCell<App>>) {
     let w = ui.as_weak();
     ui.on_import_profile(move || {
         if let Some(ui) = w.upgrade() {
-            if ui.get_dialog_busy() || ui.get_running() {
+            if ui.get_dialog_busy() || ui.get_running() || ui.get_preparing() {
                 return;
             }
             ui.set_dialog_busy(true);
@@ -700,6 +915,7 @@ fn wire(ui: &MainWindow, state: &Rc<RefCell<App>>) {
             let mut app = a.borrow_mut();
             let url = match kind.as_str() {
                 "docs" => config::DOCS_URL.to_owned(),
+                "docker" => deployment::DOCKER_INSTALL_URL.to_owned(),
                 "health" if ui.get_ready() => format!(
                     "{}/v2/health/ready",
                     app.active
@@ -788,6 +1004,7 @@ struct Smoke {
     last: Option<Instant>,
     screenshots: Vec<String>,
     configuration_callbacks: bool,
+    service_deadline: Option<Instant>,
 }
 
 fn capture_smoke(ui: &MainWindow, output: &Path, report: &mut Smoke, name: &str) {
@@ -835,6 +1052,33 @@ fn run() -> Result<(), String> {
     if let Some(profile) = argument("--profile") {
         library.current = load_profile(&PathBuf::from(profile))?;
     }
+    if let Some(mode) = argument("--execution") {
+        library.runtime.backend = match mode.as_str() {
+            "native" => Backend::Native,
+            "docker" => Backend::Docker,
+            _ => return Err("--execution 需要 native 或 docker".into()),
+        };
+    }
+    let data = config::data_directory();
+    if args.iter().any(|arg| arg == "--prepare-runtime") {
+        let ready = deployment::prepare_runtime(
+            &library.runtime,
+            &data,
+            true,
+            &deployment::new_cancellation(),
+            &|text| println!("{text}"),
+        )?;
+        println!(
+            "{}",
+            serde_json::to_string(&ready).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+    let prepared = if library.runtime.backend == Backend::Native {
+        deployment::cached_native(&data).ok()
+    } else {
+        None
+    };
     let ui = MainWindow::new().map_err(|e| e.to_string())?;
     ui.set_application_version(env!("CARGO_PKG_VERSION").into());
     let (task_tx, task_rx) = mpsc::channel();
@@ -850,6 +1094,12 @@ fn run() -> Result<(), String> {
         task_rx,
         persist: !no_persist && recovery.is_none(),
         state_file,
+        prepared,
+        runtime_cancel: deployment::new_cancellation(),
+        pending_start: false,
+        application: runtime::application_directory()?,
+        data,
+        command: None,
     }));
     wire(&ui, &state);
     state.borrow_mut().navigate(&ui, 0);
@@ -858,10 +1108,13 @@ fn run() -> Result<(), String> {
         if let Some(e) = recovery {
             format!("上次配置读取失败，原文件已保留：{e}")
         } else {
-            "OVMS 已随应用内置，选择模型后即可启动。".into()
+            "在设置中选择本机或 Docker；首次启动会自动准备运行环境。".into()
         },
     );
-    ui.invoke_inspect_runtime();
+    if let Some(ready) = &state.borrow().prepared {
+        ui.set_runtime_status(ready.description().into());
+        ui.set_runtime_version(ready.description().into());
+    }
     let poll = slint::Timer::default();
     let a = state.clone();
     let w = ui.as_weak();
@@ -882,7 +1135,7 @@ fn run() -> Result<(), String> {
         std::fs::create_dir_all(&output).map_err(|e| e.to_string())?;
         let w = ui.as_weak();
         let result = report.clone();
-        let deadline = Instant::now() + Duration::from_secs(70);
+        let deadline = Instant::now() + Duration::from_secs(1500);
         smoke_timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(500),
@@ -891,14 +1144,21 @@ fn run() -> Result<(), String> {
                     return;
                 };
                 let mut r = result.borrow_mut();
-                if Instant::now() > deadline || ui.get_failed() {
+                if ui.get_preparing() {
+                    r.service_deadline = None;
+                } else if r.stage > 0 && r.service_deadline.is_none() {
+                    r.service_deadline = Some(Instant::now() + Duration::from_secs(70));
+                }
+                if Instant::now() > deadline
+                    || r.service_deadline.is_some_and(|time| Instant::now() > time)
+                    || ui.get_failed()
+                {
                     r.failed = Some(ui.get_state_detail().to_string());
                     let _ = ui.hide();
                     return;
                 }
                 match r.stage {
                     0 => {
-                        ui.invoke_inspect_runtime();
                         ui.invoke_start_server();
                         r.stage = 1;
                     }
@@ -920,7 +1180,7 @@ fn run() -> Result<(), String> {
                                 return;
                             }
                         }
-                        if r.page < 5 {
+                        if r.page < 6 {
                             r.page += 1;
                             ui.invoke_navigate(r.page);
                             r.last = Some(Instant::now());
@@ -1031,7 +1291,7 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(e) = run() {
         eprintln!("{e}");
-        if std::env::args().any(|s| s == "--smoke-test") {
+        if std::env::args().any(|s| s == "--smoke-test" || s == "--prepare-runtime") {
             std::process::exit(1);
         } else {
             rfd::MessageDialog::new()

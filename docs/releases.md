@@ -2,7 +2,7 @@
 
 仓库：[toponehhh/OVMStudio](https://github.com/toponehhh/OVMStudio)。
 
-推送 `main`、提交针对 `main` 的 PR、推送 `v*` 标签或手动运行工作流时，GitHub Actions 会在 Windows x64 上构建与验证完整应用。
+推送 `main`、提交针对 `main` 的 PR、推送 `v*` 标签或手动运行工作流时，GitHub Actions 会运行 Windows UI/本机验证和 Linux Docker 验证。
 
 ## 发布新版本
 
@@ -17,13 +17,14 @@
 ## 工作流做什么
 
 - 使用固定 Rust 工具链和已锁定的 Cargo 依赖。
-- 校验固定版本 OVMS 官方压缩包的 SHA-256。
+- 固定版本 OVMS 仅用于参数契约和本机测试，绝不打入发布包。
 - 运行格式、Clippy、发布脚本测试、参数契约和真实 OVMS 测试。
-- 在精简 PATH、独立工作目录下运行完整 UI 一体包，执行真实推理、停止/重启和退出回收验证。
-- 检查旧运行时路径被忽略，缺失内置文件时不会回退到系统安装。
-- 把 UI、OVMS、Python、示例模型及许可证一起压缩，校验所有 ZIP CRC。
-- 为当前 CI 构建生成实际验证报告和截图，随一体包提供。
-- 发布 job 再次验证下载附件的 SHA-256、版本及两个可执行文件的校验值；先上传到草稿，附件齐全后公开。
+- 在精简 PATH、独立工作目录和空缓存下运行 UI，自动下载最新稳定 OVMS，执行真实推理、停止/重启和退出回收验证。
+- 验证旧可执行文件路径被忽略、下载后 Python 可用，以及断网后复用已安装缓存。
+- 独立 Linux job 检查 Docker、拉取官方镜像，验证中文/空格/逗号路径、推理、配置转换、停止/重启、失败和容器清理。
+- 只把 UI、示例、文档和许可证压缩，校验 ZIP CRC；发布校验会拒绝包含 OVMS 运行文件的程序包。
+- 根据当前 CI 实际证据生成验证报告和截图。
+- 发布 job 依赖 Windows 与 Docker 两个 job，重新校验附件和 UI 的 SHA-256；先上传到草稿，附件齐全后公开。草稿通过 CLI 查询数据库 ID，避免按已发布标签索引查询草稿。
 
 只使用 GitHub 自动提供的 `GITHUB_TOKEN`，不需要额外配置个人 PAT。构建 job 为只读；只有独立发布 job 请求 `contents: write`。PR 不发布版本。
 
@@ -33,4 +34,4 @@
 - [正式版本与下载](https://github.com/toponehhh/OVMStudio/releases)
 - Actions 附件保留完整 ZIP、校验文件和验证证据；Release 附件用于长期下载。
 
-上传到 Git 仓库的是源码、文档及小型示例；运行时与完整 ZIP 由工作流下载、构建并发布，不放入 Git 历史。
+上传到 Git 仓库的是源码、文档及小型示例。OVMS 运行包和 Docker 镜像由用户端按需下载，不放入 Git 历史或 Release ZIP。

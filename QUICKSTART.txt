@@ -1,15 +1,18 @@
 OVMS Studio - Windows x64
 
-1. 解压完整压缩包。
-2. 双击 OVMS-Studio\OVMS-Studio.exe。
-3. 选择模型，调整端口和参数，点击“启动服务”。
+1. 解压并双击 OVMS-Studio\OVMS-Studio.exe。
+2. 在“设置”中选择“本机运行”或“Docker 容器”。
+3. 选择模型、端口与参数，然后启动服务。
 
-已内置 Intel OVMS 2026.4.1 和 Python 运行时。
-无需配置 OVMS 路径，无需另外安装 Python。
-移动程序时请保留 OVMS-Studio.exe 旁边的整个 ovms 子目录。
+发布包只包含 UI，不包含 OVMS 运行包。
+本机模式会自动下载并校验最新官方 OVMS 包，不需要指定可执行文件路径。
+Docker 模式先检查已安装并启动的本机 Docker 引擎，再按设备拉取官方最新 CPU 或 GPU/NPU 镜像。
+Windows Docker Desktop 需要使用 Linux 容器模式。
 
-体验示例：在 UI 中导入 examples\demo-profile.json 后启动。
-tiny-add 模型将 [1,2,3] 计算为 [2,4,6]。
+首次准备环境需要网络；后续启动复用缓存。设置中可更新版本或取消准备。
+Docker 模式自动挂载模型、映射端口，停止或退出时清理容器。
+GPU/NPU 需要宿主驱动和设备透传；Windows NPU 请选择本机模式。
 
-GPU/NPU 推理仍需要对应设备驱动。
-完整说明和验证记录见 README.md 与 docs\verification.md。
+体验示例：导入 examples\demo-profile.json 后启动。
+tiny-add 会将 [1,2,3] 计算为 [2,4,6]。
+完整说明及验证范围见 README.md 和 docs\verification.md。
