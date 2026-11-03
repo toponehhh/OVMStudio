@@ -11,15 +11,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   build:
     name: Windows x64 - test and package
     runs-on: windows-2025
     timeout-minutes: 60
+    concurrency:
+      group: ${{ github.workflow }}-build-${{ github.ref }}
+      cancel-in-progress: true
     env:
       RUSTUP_TOOLCHAIN: 1.99.1-x86_64-pc-windows-msvc
       CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
@@ -152,6 +151,9 @@ jobs:
     name: Linux Docker - real image and inference
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    concurrency:
+      group: ${{ github.workflow }}-docker-${{ github.ref }}
+      cancel-in-progress: true
     env:
       RUSTUP_TOOLCHAIN: 1.99.1-x86_64-unknown-linux-gnu
       CARGO_HOME: ${{ github.workspace }}/work/cargo-home-linux

@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -32,6 +33,9 @@ class ReleaseTests(unittest.TestCase):
         with zipfile.ZipFile(self.archive, 'w') as archive:
             archive.writestr('OVMS-Studio/bundle-manifest.json', json.dumps(manifest))
             archive.writestr('OVMS-Studio/OVMS-Studio.exe', gui)
+            archive.writestr('OVMS-Studio/LICENSE', b'test license')
+            archive.writestr('OVMS-Studio/README.md', b'test documentation')
+            archive.writestr('OVMS-Studio/examples/tiny-add/1/model.onnx', b'test model')
         self.checksum.write_text(hashlib.sha256(self.archive.read_bytes()).hexdigest() +
                                  '  ' + self.archive.name + '\n', encoding='ascii')
 
@@ -71,6 +75,19 @@ class ReleaseTests(unittest.TestCase):
                                  '  ' + self.archive.name + '\n', encoding='ascii')
         with self.assertRaisesRegex(ValueError, 'runtime payload'):
             publish_release.validate_assets(self.archive, self.checksum, self.version)
+
+    def test_archive_creator_and_publisher_accept_the_same_ui_only_package(self):
+        stage = self.root / 'stage'
+        with zipfile.ZipFile(self.archive) as archive:
+            archive.extractall(stage)
+        destination = self.root / 'created'
+        destination.mkdir()
+        package = destination / self.archive.name
+        subprocess.run([sys.executable, str(BASE / 'scripts/create_bundle_archive.py'),
+                        str(stage / 'OVMS-Studio'), str(package)],
+                       check=True, capture_output=True, text=True, encoding='utf-8')
+        manifest = publish_release.validate_assets(package, Path(str(package) + '.sha256'), self.version)
+        self.assertEqual(manifest['distribution'], 'ui-only')
 
     def test_published_version_is_not_replaced_by_later_main_commits(self):
         release = {'draft': False, 'html_url': 'https://example.test/release',
